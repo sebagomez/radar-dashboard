@@ -39,6 +39,9 @@
   #list li.sel{border-color:var(--amber);color:var(--amber)}
   #list .d{color:var(--dim)}
   #list li.sel .d{color:var(--amber)}
+  #spotter{display:none;margin:0 14px 4px;padding:7px 10px;border:1px solid var(--amber);border-radius:4px;color:var(--amber);font-size:12px}
+  #spotter.show{display:block}
+  #list .star{color:var(--amber)}
   footer{padding:8px 14px;border-top:1px solid var(--line);font-size:11px;color:var(--dim)}
   @media (max-width:760px){
     main{flex-direction:column}
@@ -69,6 +72,8 @@
   <button id="refresh" type="button">Refresh now</button>
 </div>
 
+<div id="spotter"></div>
+
 <main>
   <div id="scopeWrap"><canvas id="scope"></canvas></div>
   <aside>
@@ -93,7 +98,32 @@ const state = {
   source: null,
   fetching: false, // a poll is in flight
   pollAgain: false, // a poll was requested while one was in flight
+  announced: new Set(), // spotter: hex codes already announced this visit
+  spotterHex: null, // hex currently shown in the spotter banner
 };
+
+// ---------- spotter ----------
+// Aircraft types worth a second look: vintage airframes and the big heavies.
+// Keys are the ICAO type codes the feed reports in its `t` field.
+const WATCH_TYPES = {
+  DC3: 'Douglas DC-3 — a 1940s airliner still earning its keep',
+  A388: 'Airbus A380 — the double-decker superjumbo',
+  B744: 'Boeing 747-400 — the original jumbo jet',
+  B748: 'Boeing 747-8 — the longest airliner ever built',
+  C130: 'C-130 Hercules — military airlifter',
+  B52: 'B-52 Stratofortress — the Cold War bomber',
+};
+function showSpotter(rec) {
+  const el = document.getElementById('spotter');
+  const dist = haversineKm(state.center.lat, state.center.lon, rec.lat, rec.lon);
+  el.textContent = `★ Unusual traffic: ${rec.callsign} · ${rec.notable} · ${dist.toFixed(1)} km away`;
+  el.classList.add('show');
+  state.spotterHex = rec.hex;
+}
+function hideSpotter() {
+  document.getElementById('spotter').classList.remove('show');
+  state.spotterHex = null;
+}
 const POLL_MS = 15000;
 // Never project a target more than this far past its last fix. A slow
 // refresh must not fly planes off the scope (the draw loop culls anything
@@ -189,6 +219,7 @@ function ingest(list) {
       hex: a.hex,
       callsign: (a.flight || '').trim() || a.r || a.hex,
       reg: a.r || '', type: a.t || '',
+      notable: WATCH_TYPES[a.t || ''] || null,
       lat: a.lat, lon: a.lon,
       alt: typeof a.alt_baro === 'number' ? a.alt_baro : null,
       gs: a.gs || 0, track: a.track || 0,
@@ -207,11 +238,21 @@ function ingest(list) {
     if (rec.history.length > 8) rec.history.shift();
     state.aircraft.set(a.hex, rec);
   }
+  // spotter: announce interesting traffic once per visit
+  for (const hex of seen) {
+    const rec = state.aircraft.get(hex);
+    if (rec && rec.notable && !state.announced.has(hex)) {
+      state.announced.add(hex);
+      showSpotter(rec);
+    }
+  }
   // drop targets not seen for 60 s
   for (const [hex, rec] of state.aircraft) {
     if (!seen.has(hex) && now - rec.lastSeen > 60000) {
       state.aircraft.delete(hex);
+      state.announced.delete(hex); // a later return visit announces again
       if (state.selected === hex) state.selected = null;
+      if (state.spotterHex === hex) hideSpotter();
     }
   }
   renderPanel();
@@ -313,7 +354,7 @@ function draw(now) {
     let diff = (sweep - brg) % (Math.PI * 2); if (diff < 0) diff += Math.PI * 2;
     const glow = Math.max(0, 1 - diff / 2.2); // brighten as the sweep passes
     const sel = state.selected === rec.hex;
-    const color = sel ? '#ffb347' : '#39ff6a';
+    const color = (sel || rec.notable) ? '#ffb347' : '#39ff6a';
 
     // history trail
     rec.history.forEach((h, i) => {
@@ -335,11 +376,16 @@ function draw(now) {
     ctx.fill();
     ctx.globalAlpha = 1;
     if (sel) { ctx.beginPath(); ctx.arc(p.x, p.y, 8, 0, Math.PI * 2); ctx.strokeStyle = '#ffb347'; ctx.stroke(); }
+    if (rec.notable) { // spotter pick: slow pulsing ring so it stands out
+      const pulse = 11 + 2.5 * Math.sin(now / 300);
+      ctx.beginPath(); ctx.arc(p.x, p.y, pulse, 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(255,179,71,0.85)'; ctx.lineWidth = 1.2; ctx.stroke();
+    }
     // data block
     const flip = p.x > cx; // keep blocks inside the scope
     const bx = p.x + (flip ? -64 : 10), by = p.y - 24;
     ctx.font = '10px ' + getComputedStyle(document.body).getPropertyValue('--mono');
-    ctx.fillStyle = sel ? '#ffb347' : 'rgba(200,255,215,0.92)';
+    ctx.fillStyle = (sel || rec.notable) ? '#ffb347' : 'rgba(200,255,215,0.92)';
     ctx.fillText(rec.callsign, bx, by);
     ctx.fillText(fmtAlt(rec.alt), bx, by + 11);
     ctx.fillText(String(Math.round(rec.gs)) + ' kt', bx, by + 22);
@@ -373,7 +419,7 @@ function renderPanel() {
   for (const { rec, dist } of list) {
     const li = document.createElement('li');
     if (state.selected === rec.hex) li.className = 'sel';
-    li.innerHTML = `<span>${rec.callsign}</span><span class="d">${fmtAlt(rec.alt)} · ${dist.toFixed(1)} km</span>`;
+    li.innerHTML = `<span>${rec.notable ? '<span class="star">★</span> ' : ''}${rec.callsign}</span><span class="d">${fmtAlt(rec.alt)} · ${dist.toFixed(1)} km</span>`;
     li.addEventListener('click', () => { state.selected = rec.hex; renderPanel(); });
     ul.appendChild(li);
   }
@@ -394,6 +440,7 @@ function renderPanel() {
     ['Heading', Math.round(sel.track) + '°'], ['Vertical', vr],
     ['Distance', dist.toFixed(1) + ' km'], ['Bearing', Math.round(brg) + '°'],
   ];
+  if (sel.notable) rows.splice(3, 0, ['Spotter ★', sel.notable]);
   det.innerHTML = rows.map(([k, v]) => `<div class="row"><span class="k">${k}</span><span>${v}</span></div>`).join('');
 }
 setInterval(renderPanel, 5000); // keep distances/counts fresh between polls

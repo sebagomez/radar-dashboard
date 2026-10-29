@@ -74,6 +74,7 @@ open http://localhost:8765
 - Canvas rendering: `requestAnimationFrame` loop, 60fps
 - Panel rendering: `setInterval(renderPanel, 5000)` for fresh distances
 - Polling: `setInterval(poll, 15000)` + `document.hidden` check
+- Spotter watchlist: `WATCH_TYPES` maps ICAO type codes (the feed's `t` field) to why an aircraft is interesting; matches get an amber pulsing ring on the scope, a ★ in the traffic list, and a one-time banner announcement per visit (tracked in `state.announced`)
 - No external libraries, no bundler
 
 ### CSS (inline `<style>`)
