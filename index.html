@@ -91,8 +91,15 @@ const state = {
   selected: null,
   lastOk: null,
   source: null,
+  fetching: false, // a poll is in flight
+  pollAgain: false, // a poll was requested while one was in flight
 };
 const POLL_MS = 15000;
+// Never project a target more than this far past its last fix. A slow
+// refresh must not fly planes off the scope (the draw loop culls anything
+// past the range ring, so an uncapped projection makes targets vanish
+// until the next fix lands and they pop back in).
+const MAX_PROJECT_MS = 20000;
 
 // ---------- geo helpers ----------
 const R_EARTH = 6371; // km
@@ -134,7 +141,7 @@ function applyEnu(lat, lon, eastKm, northKm) {
 // ---------- dead reckoning ----------
 // Where the aircraft should be at time `now`, from its last fix.
 function projectedPos(rec, now) {
-  const dtH = Math.max(0, (now - rec.fixT) / 3600000);
+  const dtH = Math.min(Math.max(0, now - rec.fixT), MAX_PROJECT_MS) / 3600000;
   const distKm = (rec.gs || 0) * 1.852 * dtH; // knots -> km/h
   let p = destPoint(rec.lat, rec.lon, distKm, rec.track || 0);
   // Blend: when a new fix lands, keep an offset from where the blip was
@@ -150,6 +157,10 @@ function projectedPos(rec, now) {
 // ---------- data ----------
 async function poll() {
   if (document.hidden) return;
+  // A slow fetch can outlive the poll interval. Never run two at once:
+  // overlapping responses can land out of order and yank targets around.
+  if (state.fetching) { state.pollAgain = true; return; }
+  state.fetching = true;
   const { lat, lon } = state.center;
   const url = `/api/point?lat=${lat}&lon=${lon}&radiusKm=${state.radiusKm}`;
   try {
@@ -163,6 +174,8 @@ async function poll() {
   } catch (e) {
     setStatus(false, e.message);
   }
+  state.fetching = false;
+  if (state.pollAgain) { state.pollAgain = false; poll(); }
 }
 function ingest(list) {
   const now = Date.now();

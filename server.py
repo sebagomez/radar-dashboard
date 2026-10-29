@@ -11,6 +11,7 @@ Run:  python3 server.py          (then open http://localhost:8765)
 import json
 import os
 import sys
+import time
 import urllib.request
 import urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -40,6 +41,32 @@ def get_traffic(lat, lon, radius_km):
         except Exception as e:  # noqa: BLE001 - report and try the next source
             errors.append(f"{name}: {e}")
     raise RuntimeError("; ".join(errors))
+
+
+# Last good response per (lat, lon, radius). A refresh should be fast and
+# should never come back empty-handed just because a feed hiccuped, so:
+# serve a fresh copy for a few seconds, and if both feeds fail, serve the
+# last good copy (marked stale) instead of an error.
+CACHE = {}
+CACHE_TTL_S = 10
+STALE_TTL_S = 300
+
+
+def get_traffic_cached(lat, lon, radius_km):
+    """Return (json_bytes, source_name, cache_hit)."""
+    key = (round(lat, 3), round(lon, 3), round(radius_km, 1))
+    now = time.time()
+    hit = CACHE.get(key)
+    if hit and now - hit[0] < CACHE_TTL_S:
+        return hit[1], hit[2], True
+    try:
+        body, source = get_traffic(lat, lon, radius_km)
+        CACHE[key] = (now, body, source)
+        return body, source, False
+    except RuntimeError:
+        if hit and now - hit[0] < STALE_TTL_S:
+            return hit[1], hit[2] + " (stale)", True
+        raise
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -73,8 +100,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_bytes(400, b'{"error":"bad lat/lon/radiusKm"}', "application/json")
                 return
             try:
-                body, source = get_traffic(lat, lon, radius_km)
-                self.send_bytes(200, body, "application/json", {"X-Data-Source": source})
+                body, source, cached = get_traffic_cached(lat, lon, radius_km)
+                headers = {"X-Data-Source": source, "X-Cache": "HIT" if cached else "MISS"}
+                self.send_bytes(200, body, "application/json", headers)
             except RuntimeError as e:
                 body = json.dumps({"error": str(e)}).encode()
                 self.send_bytes(502, body, "application/json")

@@ -16,7 +16,7 @@ Browser (index.html) → /api/point → server.py → adsb.lol / adsb.fi → JSO
 
 **Data flow:**
 1. Browser polls `/api/point?lat=X&lon=Y&radiusKm=Z` every 15s (when tab visible)
-2. `server.py` fetches from adsb.lol (converts km → nautical miles), falls back to adsb.fi
+2. `server.py` fetches from adsb.lol (converts km → nautical miles), falls back to adsb.fi; responses are cached 10s per location/range, and if both feeds fail the last good response is served (source marked `(stale)`) for up to 5 min
 3. Response includes `X-Data-Source` header (`adsb.lol` or `adsb.fi`)
 4. Browser ingests aircraft list, projects positions forward via dead reckoning between polls
 5. Canvas renders at 60fps via `requestAnimationFrame`; side panel updates every 5s
@@ -69,7 +69,7 @@ open http://localhost:8765
 - `'use strict'`
 - Module-level state object (`state`), no classes
 - Pure functions for geo math (`destPoint`, `haversineKm`, `bearingDeg`, `enuKm`, `applyEnu`)
-- Dead reckoning: `projectedPos(rec, now)` projects from last fix using ground speed + track
+- Dead reckoning: `projectedPos(rec, now)` projects from last fix using ground speed + track, capped at 20s past the fix (`MAX_PROJECT_MS`) so a slow refresh cannot project targets off the scope
 - Smooth blending on new fixes: `blendE`/`blendN`/`blendT` decay over ~1s to avoid teleports
 - Canvas rendering: `requestAnimationFrame` loop, 60fps
 - Panel rendering: `setInterval(renderPanel, 5000)` for fresh distances
