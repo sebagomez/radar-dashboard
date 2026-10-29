@@ -16,7 +16,7 @@ Browser (index.html) → /api/point → server.py → adsb.lol / adsb.fi → JSO
 
 **Data flow:**
 1. Browser polls `/api/point?lat=X&lon=Y&radiusKm=Z` at the user-selected refresh interval (15/30/60/120 s, default 15) when the tab is visible; the sweep line completes one revolution per interval, acting as the countdown to the next refresh
-2. `server.py` fetches from adsb.lol (converts km → nautical miles), falls back to adsb.fi; responses are cached 10s per location/range, and if both feeds fail the last good response is served (source marked `(stale)`) for up to 5 min
+2. `server.py` fetches from adsb.lol (converts km → nautical miles), falls back to adsb.fi; responses are cached 10s per location/range, and if both feeds fail the last good response is served (source marked `(stale)`) for up to 5 min. Feed payloads are normalized in `get_traffic`: adsb.fi wraps records in `aircraft` instead of `ac`, and a payload with no usable list counts as a failure — never as an empty sky (the page applies the same rule: a poll whose payload lacks an `ac` array is a failed refresh, and existing tracks keep coasting)
 3. Response includes `X-Data-Source` header (`adsb.lol` or `adsb.fi`)
 4. Browser ingests aircraft list, projects positions forward via dead reckoning between polls
 5. Canvas renders at 60fps via `requestAnimationFrame`; side panel updates every 5s
@@ -74,7 +74,6 @@ open http://localhost:8765
 - Canvas rendering: `requestAnimationFrame` loop, 60fps
 - Panel rendering: `setInterval(renderPanel, 5000)` for fresh distances
 - Polling: `setInterval(poll, state.pollMs)` via `resetPollTimer()` + `document.hidden` check; the interval is selectable in the controls (`#interval`) and the sweep period in `draw()` reads the same `state.pollMs`
-- Soft edge: a target is culled only when its last confirmed fix AND its projection are both past the range ring; a crossing target's blip rides the rim in between, so boundary crossings exit once instead of blinking at the edge
 - Spotter watchlist: `WATCH_TYPES` maps ICAO type codes (the feed's `t` field) to why an aircraft is interesting; matches get an amber pulsing ring on the scope, a ★ in the traffic list, and a one-time banner announcement per visit (tracked in `state.announced`)
 - No external libraries, no bundler
 

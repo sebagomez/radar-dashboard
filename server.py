@@ -38,7 +38,18 @@ def get_traffic(lat, lon, radius_km):
     errors = []
     for name, url in sources:
         try:
-            return fetch_json(url), name
+            data = json.loads(fetch_json(url))
+            # adsb.fi wraps the same aircraft records in "aircraft" instead
+            # of "ac". Normalize so the page always receives {"ac": [...]};
+            # a payload with no usable list is a FAILURE, not an empty sky —
+            # otherwise a fallback hiccup reads as "every plane vanished"
+            # and the track store prunes the whole scope a minute later.
+            ac = data.get("ac")
+            if ac is None and isinstance(data.get("aircraft"), list):
+                data["ac"] = ac = data["aircraft"]
+            if not isinstance(ac, list):
+                raise RuntimeError("unexpected payload shape")
+            return json.dumps(data).encode(), name
         except Exception as e:  # noqa: BLE001 - report and try the next source
             errors.append(f"{name}: {e}")
     raise RuntimeError("; ".join(errors))
