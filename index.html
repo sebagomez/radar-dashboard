@@ -84,7 +84,7 @@
   </aside>
 </main>
 
-<footer>Live ADS-B data from adsb.lol (community feed). Positions between refreshes are projected from each aircraft's speed and heading (dead reckoning) — a fast turn can make a blip drift until the next fix lands.</footer>
+<footer>Live ADS-B data from adsb.lol (community feed). Positions between refreshes are projected from each aircraft's speed and heading (dead reckoning) — a fast turn can make a blip drift until the next fix lands. Routes (when a flight is selected) come from the adsbdb.com community database and show the flight number's scheduled route.</footer>
 
 <script>
 'use strict';
@@ -100,6 +100,7 @@ const state = {
   pollAgain: false, // a poll was requested while one was in flight
   announced: new Set(), // spotter: hex codes already announced this visit
   spotterHex: null, // hex currently shown in the spotter banner
+  routes: new Map(), // callsign -> route object, 'loading', or null (unknown)
 };
 
 // ---------- spotter ----------
@@ -395,6 +396,24 @@ function draw(now) {
   requestAnimationFrame(draw);
 }
 
+// ---------- route lookup ----------
+// Airline callsigns look like ACA429: three letters, then digits. Private
+// traffic uses its registration as callsign and has no scheduled route.
+function airlineCallsign(cs) { return /^[A-Z]{3}\d/.test(cs); }
+async function ensureRoute(rec) {
+  const cs = rec.callsign;
+  if (!airlineCallsign(cs) || state.routes.has(cs)) return;
+  state.routes.set(cs, 'loading');
+  try {
+    const res = await fetch('/api/route?callsign=' + encodeURIComponent(cs));
+    const data = await res.json();
+    state.routes.set(cs, data && data.found ? data : null);
+  } catch (e) {
+    state.routes.set(cs, null);
+  }
+  if (state.selected === rec.hex) renderPanel();
+}
+
 // ---------- side panel ----------
 function currentList(now) {
   const out = [];
@@ -434,13 +453,29 @@ function renderPanel() {
   const dist = haversineKm(state.center.lat, state.center.lon, pos.lat, pos.lon);
   const brg = bearingDeg(state.center.lat, state.center.lon, pos.lat, pos.lon);
   const vr = sel.vrate > 100 ? `↑ ${sel.vrate} fpm` : sel.vrate < -100 ? `↓ ${-sel.vrate} fpm` : 'level';
-  const rows = [
-    ['Callsign', sel.callsign], ['Registration', sel.reg || '—'], ['Type', sel.type || '—'],
+  const rows = [['Callsign', sel.callsign]];
+  // where is it going? (route database lookup, fetched lazily per callsign)
+  if (airlineCallsign(sel.callsign)) {
+    ensureRoute(sel);
+    const route = state.routes.get(sel.callsign);
+    if (route === undefined || route === 'loading') {
+      rows.push(['Route', 'looking up…']);
+    } else if (route) {
+      rows.push(['Route', `${route.origin.city} (${route.origin.code}) → ${route.destination.city} (${route.destination.code})`]);
+      if (route.airline) rows.push(['Airline', route.airline]);
+    } else {
+      rows.push(['Route', 'not in the route database']);
+    }
+  }
+  rows.push(
+    ['Registration', sel.reg || '—'], ['Type', sel.type || '—'],
+  );
+  if (sel.notable) rows.push(['Spotter ★', sel.notable]);
+  rows.push(
     ['Altitude', fmtAlt(sel.alt)], ['Ground speed', Math.round(sel.gs) + ' kt'],
     ['Heading', Math.round(sel.track) + '°'], ['Vertical', vr],
     ['Distance', dist.toFixed(1) + ' km'], ['Bearing', Math.round(brg) + '°'],
-  ];
-  if (sel.notable) rows.splice(3, 0, ['Spotter ★', sel.notable]);
+  );
   det.innerHTML = rows.map(([k, v]) => `<div class="row"><span class="k">${k}</span><span>${v}</span></div>`).join('');
 }
 setInterval(renderPanel, 5000); // keep distances/counts fresh between polls
