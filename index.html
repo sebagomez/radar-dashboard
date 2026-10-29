@@ -361,7 +361,20 @@ function draw(now) {
   for (const rec of state.aircraft.values()) {
     const pos = projectedPos(rec, now);
     const p = toPx(pos.lat, pos.lon, cx, cy, scale);
-    if (Math.hypot(p.x - cx, p.y - cy) > R) continue;
+    // Soft edge: a target crossing the boundary projects past the ring
+    // between refreshes while its last confirmed fix is still inside (and
+    // the next fix may land inside again), so culling on the projection
+    // alone makes it blink out and back in at the edge. Cull only when the
+    // fix AND the projection are both outside; until then, ride the rim.
+    const fixP = toPx(rec.lat, rec.lon, cx, cy, scale);
+    const fixOut = Math.hypot(fixP.x - cx, fixP.y - cy) > R;
+    let rr = Math.hypot(p.x - cx, p.y - cy);
+    if (rr > R && fixOut) continue;
+    if (rr > R) { // clamp the blip to the rim until the fix confirms the exit
+      p.x = cx + (p.x - cx) * R / rr;
+      p.y = cy + (p.y - cy) * R / rr;
+      rr = R;
+    }
     const brg = Math.atan2(p.x - cx, -(p.y - cy));
     let diff = (sweep - brg) % (Math.PI * 2); if (diff < 0) diff += Math.PI * 2;
     const glow = Math.max(0, 1 - diff / 2.2); // brighten as the sweep passes
