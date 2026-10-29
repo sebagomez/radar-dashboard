@@ -56,7 +56,6 @@
   <h1>RADAR</h1>
   <span id="status">starting…</span>
   <span id="readout"></span>
-  <span id="diag"></span>
 </header>
 
 <div class="controls">
@@ -94,7 +93,7 @@
   </aside>
 </main>
 
-<footer>Live ADS-B data from adsb.lol (community feed). Positions between refreshes are projected from each aircraft's speed and heading (dead reckoning) — a fast turn can make a blip drift until the next fix lands. Routes (when a flight is selected) come from the adsbdb.com community database and show the flight number's scheduled route.</footer>
+<footer><span id="diag">polls 0 · errors 0 · last: 0 ac from — in 0.0 s · tracked 0</span></footer>
 
 <script>
 'use strict';
