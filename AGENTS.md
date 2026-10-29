@@ -74,7 +74,7 @@ open http://localhost:8765
 - Canvas rendering: `requestAnimationFrame` loop, 60fps
 - Panel rendering: `setInterval(renderPanel, 5000)` for fresh distances
 - Polling: `setInterval(poll, state.pollMs)` via `resetPollTimer()` + `document.hidden` check; the interval is selectable in the controls (`#interval`) and the sweep period in `draw()` reads the same `state.pollMs`
-- Diagnostics: each target draws inside its own try/catch (a bad record is skipped and counted in `state.diag.drawErrors`, never blanking the scope); the header's `#diag` line reports poll count/errors, the last poll's aircraft count, source and duration, and the tracked count — read it first when the scope misbehaves
+- Diagnostics: each target draws inside its own try/catch (a bad record is skipped and counted in `state.diag.drawErrors`, never blanking the scope); the footer's `#diag` line reports poll count/errors, the last poll's aircraft count, source and duration, and the tracked count — read it first when the scope misbehaves
 - Soft edge: a target is culled only when its last confirmed fix AND its projection are both outside the range ring; in between, the blip rides the rim (clamped to the ring) so boundary traffic doesn't blink
 - Clock discipline: `draw()` runs on `Date.now()` — `requestAnimationFrame` timestamps are a different clock from the `fixT`/`blendT` fix times, and mixing them makes the blend factor explode and flings targets off-scope
 - Stale targets: a track with no fix for more than two poll intervals (`isStale`) is coasting — it renders dimmed on the scope (alpha × 0.35, `· STALE` data-block tag) and faded in the traffic list (`· stale` suffix; details show seconds since update) until the 60 s prune
