@@ -69,6 +69,13 @@
     <option value="50">50 km</option>
     <option value="100">100 km</option>
   </select>
+  <label for="interval">Refresh</label>
+  <select id="interval">
+    <option value="15" selected>15 s</option>
+    <option value="30">30 s</option>
+    <option value="60">60 s</option>
+    <option value="120">120 s</option>
+  </select>
   <button id="refresh" type="button">Refresh now</button>
 </div>
 
@@ -98,6 +105,8 @@ const state = {
   source: null,
   fetching: false, // a poll is in flight
   pollAgain: false, // a poll was requested while one was in flight
+  pollMs: 15000, // refresh interval, selectable in the controls
+  pollTimer: null, // setInterval handle for the poll loop
   announced: new Set(), // spotter: hex codes already announced this visit
   spotterHex: null, // hex currently shown in the spotter banner
   routes: new Map(), // callsign -> route object, 'loading', or null (unknown)
@@ -125,12 +134,12 @@ function hideSpotter() {
   document.getElementById('spotter').classList.remove('show');
   state.spotterHex = null;
 }
-const POLL_MS = 15000;
-// Never project a target more than this far past its last fix. A slow
-// refresh must not fly planes off the scope (the draw loop culls anything
-// past the range ring, so an uncapped projection makes targets vanish
-// until the next fix lands and they pop back in).
-const MAX_PROJECT_MS = 20000;
+// Never project a target far past its last fix. A slow refresh must not
+// fly planes off the scope (the draw loop culls anything past the range
+// ring, so an uncapped projection makes targets vanish until the next fix
+// lands and they pop back in). The cap follows the chosen refresh
+// interval: one interval of travel, plus a small grace for a late fetch.
+function maxProjectMs() { return state.pollMs + 5000; }
 
 // ---------- geo helpers ----------
 const R_EARTH = 6371; // km
@@ -172,7 +181,7 @@ function applyEnu(lat, lon, eastKm, northKm) {
 // ---------- dead reckoning ----------
 // Where the aircraft should be at time `now`, from its last fix.
 function projectedPos(rec, now) {
-  const dtH = Math.min(Math.max(0, now - rec.fixT), MAX_PROJECT_MS) / 3600000;
+  const dtH = Math.min(Math.max(0, now - rec.fixT), maxProjectMs()) / 3600000;
   const distKm = (rec.gs || 0) * 1.852 * dtH; // knots -> km/h
   let p = destPoint(rec.lat, rec.lon, distKm, rec.track || 0);
   // Blend: when a new fix lands, keep an offset from where the blip was
@@ -331,8 +340,10 @@ function draw(now) {
   // center mark
   ctx.beginPath(); ctx.arc(cx, cy, 2.5, 0, Math.PI * 2); ctx.fillStyle = '#39ff6a'; ctx.fill();
 
-  // sweep (one revolution per 4 s), phosphor trail behind it
-  const sweep = (now % 4000) / 4000 * Math.PI * 2;
+  // sweep: one full revolution per refresh interval, phosphor trail behind it.
+  // At a 15 s interval the line takes 15 s to circle the scope, so the sweep
+  // itself becomes the countdown to the next refresh.
+  const sweep = (now % state.pollMs) / state.pollMs * Math.PI * 2;
   for (let i = 0; i < 42; i++) {
     const a = sweep - i * 0.012;
     ctx.beginPath();
@@ -504,8 +515,17 @@ function applyControls(refetch) {
   state.radiusKm = parseFloat(document.getElementById('range').value) || 25;
   if (refetch) poll();
 }
+function resetPollTimer() {
+  if (state.pollTimer) clearInterval(state.pollTimer);
+  state.pollTimer = setInterval(poll, state.pollMs);
+}
 document.getElementById('setLoc').addEventListener('click', () => applyControls(true));
 document.getElementById('range').addEventListener('change', () => applyControls(true));
+document.getElementById('interval').addEventListener('change', ev => {
+  state.pollMs = (parseInt(ev.target.value, 10) || 15) * 1000;
+  resetPollTimer();
+  poll(); // refresh right away at the new cadence
+});
 document.getElementById('refresh').addEventListener('click', () => poll());
 document.getElementById('geo').addEventListener('click', () => {
   if (!navigator.geolocation) { alert('Geolocation is not available in this browser.'); return; }
@@ -523,7 +543,7 @@ document.getElementById('geo').addEventListener('click', () => {
 // ---------- go ----------
 fitCanvas();
 poll();
-setInterval(poll, POLL_MS);
+resetPollTimer();
 requestAnimationFrame(draw);
 </script>
 </body>
