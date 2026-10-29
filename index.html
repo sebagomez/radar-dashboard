@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Radar Dashboard</title>
+<style>
+  :root{
+    --bg:#031007; --panel:#06190c; --line:#14532a; --txt:#9fe8b1; --dim:#4d8a5f;
+    --bright:#39ff6a; --amber:#ffb347; --red:#ff5f56;
+    --mono:ui-monospace,'SF Mono',SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0;background:var(--bg);color:var(--txt);font-family:var(--mono)}
+  header{display:flex;flex-wrap:wrap;gap:8px 18px;align-items:baseline;padding:10px 14px;border-bottom:1px solid var(--line)}
+  header h1{font-size:15px;letter-spacing:3px;margin:0;color:var(--bright);font-weight:600}
+  #status{font-size:12px;color:var(--dim)}
+  #status.live{color:var(--bright)}
+  #status.err{color:var(--red)}
+  #readout{font-size:12px;color:var(--txt)}
+  .controls{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;border-bottom:1px solid var(--line);font-size:12px}
+  .controls label{color:var(--dim)}
+  .controls input,.controls select{background:#021005;color:var(--txt);border:1px solid var(--line);border-radius:4px;padding:5px 7px;font-family:var(--mono);font-size:12px;width:110px}
+  .controls select{width:auto}
+  .controls button{background:#0a2e16;color:var(--bright);border:1px solid var(--line);border-radius:4px;padding:5px 10px;font-family:var(--mono);font-size:12px;cursor:pointer}
+  .controls button:hover{background:#0f4220}
+  main{display:flex;gap:0;align-items:stretch}
+  #scopeWrap{flex:1 1 auto;display:flex;align-items:center;justify-content:center;padding:10px;min-width:0}
+  canvas{display:block;cursor:crosshair}
+  aside{width:280px;flex:0 0 280px;border-left:1px solid var(--line);padding:10px 12px;font-size:12px;overflow-y:auto}
+  aside h2{font-size:11px;letter-spacing:2px;color:var(--dim);margin:12px 0 6px;font-weight:600}
+  aside h2:first-child{margin-top:0}
+  #details .row{display:flex;justify-content:space-between;gap:10px;padding:2px 0}
+  #details .k{color:var(--dim)}
+  #details .none{color:var(--dim)}
+  #list{list-style:none;margin:0;padding:0}
+  #list li{padding:5px 6px;border:1px solid transparent;border-radius:4px;cursor:pointer;display:flex;justify-content:space-between;gap:8px}
+  #list li:hover{border-color:var(--line)}
+  #list li.sel{border-color:var(--amber);color:var(--amber)}
+  #list .d{color:var(--dim)}
+  #list li.sel .d{color:var(--amber)}
+  footer{padding:8px 14px;border-top:1px solid var(--line);font-size:11px;color:var(--dim)}
+  @media (max-width:760px){
+    main{flex-direction:column}
+    aside{width:auto;flex:none;border-left:none;border-top:1px solid var(--line)}
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>RADAR</h1>
+  <span id="status">starting…</span>
+  <span id="readout"></span>
+</header>
+
+<div class="controls">
+  <label for="lat">Lat</label><input id="lat" type="number" step="0.0001" value="45.531">
+  <label for="lon">Lon</label><input id="lon" type="number" step="0.0001" value="-73.519">
+  <button id="setLoc" type="button">Set location</button>
+  <button id="geo" type="button">Use my location</button>
+  <label for="range">Range</label>
+  <select id="range">
+    <option value="5">5 km</option>
+    <option value="10">10 km</option>
+    <option value="25" selected>25 km</option>
+    <option value="50">50 km</option>
+    <option value="100">100 km</option>
+  </select>
+  <button id="refresh" type="button">Refresh now</button>
+</div>
+
+<main>
+  <div id="scopeWrap"><canvas id="scope"></canvas></div>
+  <aside>
+    <h2>SELECTED</h2>
+    <div id="details"><span class="none">Click a target on the scope or in the list.</span></div>
+    <h2>TRAFFIC</h2>
+    <ul id="list"></ul>
+  </aside>
+</main>
+
+<footer>Live ADS-B data from adsb.lol (community feed). Positions between refreshes are projected from each aircraft's speed and heading (dead reckoning) — a fast turn can make a blip drift until the next fix lands.</footer>
+
+<script>
+'use strict';
+// ---------- state ----------
+const state = {
+  center: { lat: 45.531, lon: -73.519 }, // Longueuil, QC
+  radiusKm: 25,
+  aircraft: new Map(), // hex -> record
+  selected: null,
+  lastOk: null,
+  source: null,
+};
+const POLL_MS = 15000;
+
+// ---------- geo helpers ----------
+const R_EARTH = 6371; // km
+const toRad = d => d * Math.PI / 180;
+const toDeg = r => r * 180 / Math.PI;
+
+// Project a fix forward along a bearing for distKm (great-circle destination point)
+function destPoint(lat, lon, distKm, bearingDeg) {
+  const d = distKm / R_EARTH, b = toRad(bearingDeg);
+  const la1 = toRad(lat), lo1 = toRad(lon);
+  const la2 = Math.asin(Math.sin(la1) * Math.cos(d) + Math.cos(la1) * Math.sin(d) * Math.cos(b));
+  const lo2 = lo1 + Math.atan2(Math.sin(b) * Math.sin(d) * Math.cos(la1), Math.cos(d) - Math.sin(la1) * Math.sin(la2));
+  return { lat: toDeg(la2), lon: toDeg(lo2) };
+}
+function haversineKm(aLat, aLon, bLat, bLon) {
+  const dLa = toRad(bLat - aLat), dLo = toRad(bLon - aLon);
+  const h = Math.sin(dLa / 2) ** 2 + Math.cos(toRad(aLat)) * Math.cos(toRad(bLat)) * Math.sin(dLo / 2) ** 2;
+  return 2 * R_EARTH * Math.asin(Math.sqrt(h));
+}
+function bearingDeg(aLat, aLon, bLat, bLon) {
+  const y = Math.sin(toRad(bLon - aLon)) * Math.cos(toRad(bLat));
+  const x = Math.cos(toRad(aLat)) * Math.sin(toRad(bLat)) - Math.sin(toRad(aLat)) * Math.cos(toRad(bLat)) * Math.cos(toRad(bLon - aLon));
+  return (toDeg(Math.atan2(y, x)) + 360) % 360;
+}
+// km offset (east, north) from point A to point B, local flat approximation
+function enuKm(aLat, aLon, bLat, bLon) {
+  return {
+    east: toRad(bLon - aLon) * R_EARTH * Math.cos(toRad(aLat)),
+    north: toRad(bLat - aLat) * R_EARTH,
+  };
+}
+function applyEnu(lat, lon, eastKm, northKm) {
+  return {
+    lat: lat + toDeg(northKm / R_EARTH),
+    lon: lon + toDeg(eastKm / (R_EARTH * Math.cos(toRad(lat)))),
+  };
+}
+
+// ---------- dead reckoning ----------
+// Where the aircraft should be at time `now`, from its last fix.
+function projectedPos(rec, now) {
+  const dtH = Math.max(0, (now - rec.fixT) / 3600000);
+  const distKm = (rec.gs || 0) * 1.852 * dtH; // knots -> km/h
+  let p = destPoint(rec.lat, rec.lon, distKm, rec.track || 0);
+  // Blend: when a new fix lands, keep an offset from where the blip was
+  // actually drawn and let it decay over ~1 s so the target never teleports.
+  if (rec.blendT) {
+    const f = Math.max(0, 1 - (now - rec.blendT) / 1000);
+    if (f > 0) p = applyEnu(p.lat, p.lon, rec.blendE * f, rec.blendN * f);
+    else rec.blendT = 0;
+  }
+  return p;
+}
+
+// ---------- data ----------
+async function poll() {
+  if (document.hidden) return;
+  const { lat, lon } = state.center;
+  const url = `/api/point?lat=${lat}&lon=${lon}&radiusKm=${state.radiusKm}`;
+  try {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    state.source = res.headers.get('X-Data-Source') || 'adsb.lol';
+    ingest(data.ac || []);
+    state.lastOk = Date.now();
+    setStatus(true);
+  } catch (e) {
+    setStatus(false, e.message);
+  }
+}
+function ingest(list) {
+  const now = Date.now();
+  const seen = new Set();
+  for (const a of list) {
+    if (a.lat == null || a.lon == null) continue;
+    if (a.alt_baro === 'ground') continue; // scope shows airborne only
+    seen.add(a.hex);
+    const prev = state.aircraft.get(a.hex);
+    const rec = {
+      hex: a.hex,
+      callsign: (a.flight || '').trim() || a.r || a.hex,
+      reg: a.r || '', type: a.t || '',
+      lat: a.lat, lon: a.lon,
+      alt: typeof a.alt_baro === 'number' ? a.alt_baro : null,
+      gs: a.gs || 0, track: a.track || 0,
+      vrate: a.baro_rate || 0,
+      fixT: now, lastSeen: now,
+      history: prev ? prev.history : [],
+      blendT: 0, blendE: 0, blendN: 0,
+    };
+    if (prev) {
+      // where was the blip on screen an instant ago?
+      const shown = projectedPos(prev, now);
+      const off = enuKm(rec.lat, rec.lon, shown.lat, shown.lon);
+      rec.blendE = off.east; rec.blendN = off.north; rec.blendT = now;
+    }
+    rec.history.push({ lat: rec.lat, lon: rec.lon });
+    if (rec.history.length > 8) rec.history.shift();
+    state.aircraft.set(a.hex, rec);
+  }
+  // drop targets not seen for 60 s
+  for (const [hex, rec] of state.aircraft) {
+    if (!seen.has(hex) && now - rec.lastSeen > 60000) {
+      state.aircraft.delete(hex);
+      if (state.selected === hex) state.selected = null;
+    }
+  }
+  renderPanel();
+}
+function setStatus(ok, msg) {
+  const el = document.getElementById('status');
+  if (ok) {
+    el.className = 'live';
+    el.textContent = `LIVE · ${state.source} · updated ${new Date(state.lastOk).toLocaleTimeString()}`;
+  } else {
+    el.className = 'err';
+    el.textContent = 'FEED ERROR — ' + (msg || 'unknown') + ' (is server.py running? open this page through http://localhost, not as a file)';
+  }
+}
+
+// ---------- scope rendering ----------
+const canvas = document.getElementById('scope');
+const ctx = canvas.getContext('2d');
+function fitCanvas() {
+  const wrap = document.getElementById('scopeWrap');
+  const size = Math.max(280, Math.min(wrap.clientWidth - 20, window.innerHeight - 210, 720));
+  const dpr = window.devicePixelRatio || 1;
+  canvas.style.width = size + 'px';
+  canvas.style.height = size + 'px';
+  canvas.width = Math.round(size * dpr);
+  canvas.height = Math.round(size * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+window.addEventListener('resize', fitCanvas);
+
+function toPx(lat, lon, cx, cy, scale) {
+  const e = enuKm(state.center.lat, state.center.lon, lat, lon);
+  return { x: cx + e.east * scale, y: cy - e.north * scale };
+}
+function fmtAlt(ft) {
+  if (ft == null) return '———';
+  if (ft >= 18000) return 'FL' + Math.round(ft / 100);
+  return ft.toLocaleString('en-US') + ' ft';
+}
+function draw(now) {
+  const W = canvas.clientWidth, H = canvas.clientHeight;
+  const cx = W / 2, cy = H / 2;
+  const R = Math.min(W, H) / 2 - 14;
+  const scale = R / state.radiusKm; // px per km
+  ctx.clearRect(0, 0, W, H);
+
+  // scope face
+  ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2);
+  ctx.fillStyle = '#04170a'; ctx.fill();
+  ctx.strokeStyle = '#1d7a3a'; ctx.lineWidth = 1.5; ctx.stroke();
+
+  // range rings at 1/4, 1/2, 3/4, full
+  ctx.lineWidth = 1;
+  for (const f of [0.25, 0.5, 0.75, 1]) {
+    ctx.beginPath(); ctx.arc(cx, cy, R * f, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(57,255,106,0.18)'; ctx.stroke();
+    ctx.fillStyle = 'rgba(159,232,177,0.55)';
+    ctx.font = '10px ' + getComputedStyle(document.body).getPropertyValue('--mono');
+    ctx.fillText((state.radiusKm * f).toFixed(state.radiusKm * f < 10 ? 1 : 0) + ' km', cx + 4, cy - R * f + 12);
+  }
+  // compass ticks + cardinals
+  for (let deg = 0; deg < 360; deg += 10) {
+    const a = toRad(deg), long = deg % 30 === 0;
+    const r1 = R - (long ? 10 : 5);
+    ctx.beginPath();
+    ctx.moveTo(cx + Math.sin(a) * r1, cy - Math.cos(a) * r1);
+    ctx.lineTo(cx + Math.sin(a) * R, cy - Math.cos(a) * R);
+    ctx.strokeStyle = 'rgba(57,255,106,0.5)'; ctx.stroke();
+  }
+  ctx.fillStyle = '#9fe8b1'; ctx.font = 'bold 11px ' + getComputedStyle(document.body).getPropertyValue('--mono');
+  ctx.fillText('N', cx - 3, cy - R - 3);
+  ctx.fillText('S', cx - 3, cy + R + 12);
+  ctx.fillText('E', cx + R + 4, cy + 3);
+  ctx.fillText('W', cx - R - 12, cy + 3);
+  // center mark
+  ctx.beginPath(); ctx.arc(cx, cy, 2.5, 0, Math.PI * 2); ctx.fillStyle = '#39ff6a'; ctx.fill();
+
+  // sweep (one revolution per 4 s), phosphor trail behind it
+  const sweep = (now % 4000) / 4000 * Math.PI * 2;
+  for (let i = 0; i < 42; i++) {
+    const a = sweep - i * 0.012;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.lineTo(cx + Math.sin(a) * R, cy - Math.cos(a) * R);
+    ctx.strokeStyle = `rgba(57,255,106,${0.16 * (1 - i / 42)})`;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+  ctx.beginPath(); ctx.moveTo(cx, cy);
+  ctx.lineTo(cx + Math.sin(sweep) * R, cy - Math.cos(sweep) * R);
+  ctx.strokeStyle = 'rgba(120,255,160,0.85)'; ctx.lineWidth = 1.5; ctx.stroke();
+
+  // targets
+  for (const rec of state.aircraft.values()) {
+    const pos = projectedPos(rec, now);
+    const p = toPx(pos.lat, pos.lon, cx, cy, scale);
+    if (Math.hypot(p.x - cx, p.y - cy) > R) continue;
+    const brg = Math.atan2(p.x - cx, -(p.y - cy));
+    let diff = (sweep - brg) % (Math.PI * 2); if (diff < 0) diff += Math.PI * 2;
+    const glow = Math.max(0, 1 - diff / 2.2); // brighten as the sweep passes
+    const sel = state.selected === rec.hex;
+    const color = sel ? '#ffb347' : '#39ff6a';
+
+    // history trail
+    rec.history.forEach((h, i) => {
+      const hp = toPx(h.lat, h.lon, cx, cy, scale);
+      ctx.beginPath(); ctx.arc(hp.x, hp.y, 1.6, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(57,255,106,${0.10 + 0.25 * (i / rec.history.length)})`;
+      ctx.fill();
+    });
+    // 60-second vector line
+    const ahead = destPoint(pos.lat, pos.lon, (rec.gs * 1.852) / 60, rec.track);
+    const ap = toPx(ahead.lat, ahead.lon, cx, cy, scale);
+    ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(ap.x, ap.y);
+    ctx.strokeStyle = sel ? 'rgba(255,179,71,0.9)' : 'rgba(57,255,106,0.65)';
+    ctx.lineWidth = 1; ctx.stroke();
+    // blip
+    ctx.beginPath(); ctx.arc(p.x, p.y, sel ? 4 : 3, 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.globalAlpha = 0.55 + 0.45 * glow;
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    if (sel) { ctx.beginPath(); ctx.arc(p.x, p.y, 8, 0, Math.PI * 2); ctx.strokeStyle = '#ffb347'; ctx.stroke(); }
+    // data block
+    const flip = p.x > cx; // keep blocks inside the scope
+    const bx = p.x + (flip ? -64 : 10), by = p.y - 24;
+    ctx.font = '10px ' + getComputedStyle(document.body).getPropertyValue('--mono');
+    ctx.fillStyle = sel ? '#ffb347' : 'rgba(200,255,215,0.92)';
+    ctx.fillText(rec.callsign, bx, by);
+    ctx.fillText(fmtAlt(rec.alt), bx, by + 11);
+    ctx.fillText(String(Math.round(rec.gs)) + ' kt', bx, by + 22);
+    ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(flip ? bx + 58 : bx, by + 4);
+    ctx.strokeStyle = 'rgba(57,255,106,0.35)'; ctx.stroke();
+  }
+  requestAnimationFrame(draw);
+}
+
+// ---------- side panel ----------
+function currentList(now) {
+  const out = [];
+  for (const rec of state.aircraft.values()) {
+    const pos = projectedPos(rec, now);
+    out.push({ rec, dist: haversineKm(state.center.lat, state.center.lon, pos.lat, pos.lon) });
+  }
+  out.sort((a, b) => a.dist - b.dist);
+  return out;
+}
+function renderPanel() {
+  const now = Date.now();
+  const list = currentList(now);
+  // readout
+  const ro = document.getElementById('readout');
+  ro.textContent = list.length
+    ? `${list.length} aircraft · closest ${list[0].rec.callsign} at ${list[0].dist.toFixed(1)} km`
+    : 'no aircraft in range';
+  // traffic list
+  const ul = document.getElementById('list');
+  ul.innerHTML = '';
+  for (const { rec, dist } of list) {
+    const li = document.createElement('li');
+    if (state.selected === rec.hex) li.className = 'sel';
+    li.innerHTML = `<span>${rec.callsign}</span><span class="d">${fmtAlt(rec.alt)} · ${dist.toFixed(1)} km</span>`;
+    li.addEventListener('click', () => { state.selected = rec.hex; renderPanel(); });
+    ul.appendChild(li);
+  }
+  // details
+  const det = document.getElementById('details');
+  const sel = state.selected ? state.aircraft.get(state.selected) : null;
+  if (!sel) {
+    det.innerHTML = '<span class="none">Click a target on the scope or in the list.</span>';
+    return;
+  }
+  const pos = projectedPos(sel, now);
+  const dist = haversineKm(state.center.lat, state.center.lon, pos.lat, pos.lon);
+  const brg = bearingDeg(state.center.lat, state.center.lon, pos.lat, pos.lon);
+  const vr = sel.vrate > 100 ? `↑ ${sel.vrate} fpm` : sel.vrate < -100 ? `↓ ${-sel.vrate} fpm` : 'level';
+  const rows = [
+    ['Callsign', sel.callsign], ['Registration', sel.reg || '—'], ['Type', sel.type || '—'],
+    ['Altitude', fmtAlt(sel.alt)], ['Ground speed', Math.round(sel.gs) + ' kt'],
+    ['Heading', Math.round(sel.track) + '°'], ['Vertical', vr],
+    ['Distance', dist.toFixed(1) + ' km'], ['Bearing', Math.round(brg) + '°'],
+  ];
+  det.innerHTML = rows.map(([k, v]) => `<div class="row"><span class="k">${k}</span><span>${v}</span></div>`).join('');
+}
+setInterval(renderPanel, 5000); // keep distances/counts fresh between polls
+
+// ---------- interaction ----------
+canvas.addEventListener('click', ev => {
+  const rect = canvas.getBoundingClientRect();
+  const mx = ev.clientX - rect.left, my = ev.clientY - rect.top;
+  const cx = canvas.clientWidth / 2, cy = canvas.clientHeight / 2;
+  const R = Math.min(canvas.clientWidth, canvas.clientHeight) / 2 - 14;
+  const scale = R / state.radiusKm;
+  const now = Date.now();
+  let best = null, bestD = 18;
+  for (const rec of state.aircraft.values()) {
+    const p = toPx(projectedPos(rec, now).lat, projectedPos(rec, now).lon, cx, cy, scale);
+    const d = Math.hypot(p.x - mx, p.y - my);
+    if (d < bestD) { bestD = d; best = rec.hex; }
+  }
+  state.selected = best;
+  renderPanel();
+});
+function applyControls(refetch) {
+  const lat = parseFloat(document.getElementById('lat').value);
+  const lon = parseFloat(document.getElementById('lon').value);
+  if (Number.isFinite(lat) && Number.isFinite(lon)) state.center = { lat, lon };
+  state.radiusKm = parseFloat(document.getElementById('range').value) || 25;
+  if (refetch) poll();
+}
+document.getElementById('setLoc').addEventListener('click', () => applyControls(true));
+document.getElementById('range').addEventListener('change', () => applyControls(true));
+document.getElementById('refresh').addEventListener('click', () => poll());
+document.getElementById('geo').addEventListener('click', () => {
+  if (!navigator.geolocation) { alert('Geolocation is not available in this browser.'); return; }
+  navigator.geolocation.getCurrentPosition(
+    pos => {
+      document.getElementById('lat').value = pos.coords.latitude.toFixed(4);
+      document.getElementById('lon').value = pos.coords.longitude.toFixed(4);
+      applyControls(true);
+    },
+    () => alert('Location was not shared — type coordinates instead.'),
+    { timeout: 10000 }
+  );
+});
+
+// ---------- go ----------
+fitCanvas();
+poll();
+setInterval(poll, POLL_MS);
+requestAnimationFrame(draw);
+</script>
+</body>
+</html>
