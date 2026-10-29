@@ -39,6 +39,7 @@
   #list li:hover{border-color:var(--line)}
   #list li.sel{border-color:var(--amber);color:var(--amber)}
   #list .d{color:var(--dim)}
+  #list li.stale{opacity:.45}
   #list li.sel .d{color:var(--amber)}
   #spotter{display:none;margin:0 14px 4px;padding:7px 10px;border:1px solid var(--amber);border-radius:4px;color:var(--amber);font-size:12px}
   #spotter.show{display:block}
@@ -143,6 +144,8 @@ function hideSpotter() {
 // lands and they pop back in). The cap follows the chosen refresh
 // interval: one interval of travel, plus a small grace for a late fetch.
 function maxProjectMs() { return state.pollMs + 5000; }
+// a target is stale (coasting on its last fix) once it has missed ~two polls
+function isStale(rec, now) { return now - rec.fixT > state.pollMs * 2; }
 
 // ---------- geo helpers ----------
 const R_EARTH = 6371; // km
@@ -316,6 +319,11 @@ function fmtAlt(ft) {
   return ft.toLocaleString('en-US') + ' ft';
 }
 function draw(now) {
+  // requestAnimationFrame passes a performance-timeline timestamp, but fix
+  // times (fixT / blendT) are Date.now() epoch ms. Mixing the two made the
+  // blend factor explode, flinging every target off-scope from its second
+  // fix onward. Always draw on the epoch clock.
+  now = Date.now();
   const W = canvas.clientWidth, H = canvas.clientHeight;
   const cx = W / 2, cy = H / 2;
   const R = Math.min(W, H) / 2 - 14;
@@ -376,7 +384,21 @@ function draw(now) {
     try {
     const pos = projectedPos(rec, now);
     const p = toPx(pos.lat, pos.lon, cx, cy, scale);
-    if (Math.hypot(p.x - cx, p.y - cy) > R) continue;
+    // Soft edge: a target crossing the boundary projects past the ring
+    // between refreshes while its last confirmed fix is still inside (and
+    // the next fix may land inside again), so culling on the projection
+    // alone makes it blink out and back in at the edge. Cull only when the
+    // fix AND the projection are both outside; until then, ride the rim.
+    const fixP = toPx(rec.lat, rec.lon, cx, cy, scale);
+    const fixOut = Math.hypot(fixP.x - cx, fixP.y - cy) > R;
+    let rr = Math.hypot(p.x - cx, p.y - cy);
+    if (rr > R && fixOut) continue;
+    if (rr > R) { // clamp the blip to the rim until the fix confirms the exit
+      p.x = cx + (p.x - cx) * R / rr;
+      p.y = cy + (p.y - cy) * R / rr;
+      rr = R;
+    }
+    const stale = isStale(rec, now), dim = stale ? 0.35 : 1;
     const brg = Math.atan2(p.x - cx, -(p.y - cy));
     let diff = (sweep - brg) % (Math.PI * 2); if (diff < 0) diff += Math.PI * 2;
     const glow = Math.max(0, 1 - diff / 2.2); // brighten as the sweep passes
@@ -387,37 +409,37 @@ function draw(now) {
     rec.history.forEach((h, i) => {
       const hp = toPx(h.lat, h.lon, cx, cy, scale);
       ctx.beginPath(); ctx.arc(hp.x, hp.y, 1.6, 0, Math.PI * 2);
-      ctx.fillStyle = `rgba(57,255,106,${0.10 + 0.25 * (i / rec.history.length)})`;
+      ctx.fillStyle = `rgba(57,255,106,${(0.10 + 0.25 * (i / rec.history.length)) * dim})`;
       ctx.fill();
     });
     // 60-second vector line
     const ahead = destPoint(pos.lat, pos.lon, (rec.gs * 1.852) / 60, rec.track);
     const ap = toPx(ahead.lat, ahead.lon, cx, cy, scale);
     ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(ap.x, ap.y);
-    ctx.strokeStyle = sel ? 'rgba(255,179,71,0.9)' : 'rgba(57,255,106,0.65)';
+    ctx.strokeStyle = sel ? 'rgba(255,179,71,' + (0.9 * dim) + ')' : 'rgba(57,255,106,' + (0.65 * dim) + ')';
     ctx.lineWidth = 1; ctx.stroke();
     // blip
     ctx.beginPath(); ctx.arc(p.x, p.y, sel ? 4 : 3, 0, Math.PI * 2);
     ctx.fillStyle = color;
-    ctx.globalAlpha = 0.55 + 0.45 * glow;
+    ctx.globalAlpha = (0.55 + 0.45 * glow) * dim;
     ctx.fill();
     ctx.globalAlpha = 1;
     if (sel) { ctx.beginPath(); ctx.arc(p.x, p.y, 8, 0, Math.PI * 2); ctx.strokeStyle = '#ffb347'; ctx.stroke(); }
     if (rec.notable) { // spotter pick: slow pulsing ring so it stands out
       const pulse = 11 + 2.5 * Math.sin(now / 300);
       ctx.beginPath(); ctx.arc(p.x, p.y, pulse, 0, Math.PI * 2);
-      ctx.strokeStyle = 'rgba(255,179,71,0.85)'; ctx.lineWidth = 1.2; ctx.stroke();
+      ctx.strokeStyle = 'rgba(255,179,71,' + (0.85 * dim) + ')'; ctx.lineWidth = 1.2; ctx.stroke();
     }
     // data block
     const flip = p.x > cx; // keep blocks inside the scope
     const bx = p.x + (flip ? -64 : 10), by = p.y - 24;
     ctx.font = '10px ' + getComputedStyle(document.body).getPropertyValue('--mono');
-    ctx.fillStyle = (sel || rec.notable) ? '#ffb347' : 'rgba(200,255,215,0.92)';
-    ctx.fillText(rec.callsign, bx, by);
+    ctx.fillStyle = (sel || rec.notable) ? '#ffb347' : (stale ? 'rgba(200,255,215,0.5)' : 'rgba(200,255,215,0.92)');
+    ctx.fillText(rec.callsign + (stale ? ' \u00b7 STALE' : ''), bx, by);
     ctx.fillText(fmtAlt(rec.alt), bx, by + 11);
     ctx.fillText(String(Math.round(rec.gs)) + ' kt', bx, by + 22);
     ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(flip ? bx + 58 : bx, by + 4);
-    ctx.strokeStyle = 'rgba(57,255,106,0.35)'; ctx.stroke();
+    ctx.strokeStyle = 'rgba(57,255,106,' + (0.35 * dim) + ')'; ctx.stroke();
     } catch (e) {
       state.diag.drawErrors++;
       if (!state.diag.lastDrawError) state.diag.lastDrawError = e.message;
@@ -467,8 +489,9 @@ function renderPanel() {
   ul.innerHTML = '';
   for (const { rec, dist } of list) {
     const li = document.createElement('li');
-    if (state.selected === rec.hex) li.className = 'sel';
-    li.innerHTML = `<span>${rec.notable ? '<span class="star">★</span> ' : ''}${rec.callsign}</span><span class="d">${fmtAlt(rec.alt)} · ${dist.toFixed(1)} km</span>`;
+    const staleRow = isStale(rec, now);
+    li.className = (state.selected === rec.hex ? 'sel' : '') + (staleRow ? ' stale' : '');
+    li.innerHTML = `<span>${rec.notable ? '<span class="star">★</span> ' : ''}${rec.callsign}</span><span class="d">${fmtAlt(rec.alt)} · ${dist.toFixed(1)} km${staleRow ? ' · stale' : ''}</span>`;
     li.addEventListener('click', () => { state.selected = rec.hex; renderPanel(); });
     ul.appendChild(li);
   }
@@ -501,6 +524,7 @@ function renderPanel() {
     ['Registration', sel.reg || '—'], ['Type', sel.type || '—'],
   );
   if (sel.notable) rows.push(['Spotter ★', sel.notable]);
+  if (isStale(sel, now)) rows.push(['Status', `STALE · ${Math.round((now - sel.fixT) / 1000)} s since update`]);
   rows.push(
     ['Altitude', fmtAlt(sel.alt)], ['Ground speed', Math.round(sel.gs) + ' kt'],
     ['Heading', Math.round(sel.track) + '°'], ['Vertical', vr],
