@@ -74,6 +74,7 @@ open http://localhost:8765
 - Canvas rendering: `requestAnimationFrame` loop, 60fps
 - Panel rendering: `setInterval(renderPanel, 5000)` for fresh distances
 - Polling: `setInterval(poll, state.pollMs)` via `resetPollTimer()` + `document.hidden` check; the interval is selectable in the controls (`#interval`) and the sweep period in `draw()` reads the same `state.pollMs`
+- Soft edge: a target is culled only when its last confirmed fix AND its projection are both past the range ring; a crossing target's blip rides the rim in between, so boundary crossings exit once instead of blinking at the edge
 - Spotter watchlist: `WATCH_TYPES` maps ICAO type codes (the feed's `t` field) to why an aircraft is interesting; matches get an amber pulsing ring on the scope, a ★ in the traffic list, and a one-time banner announcement per visit (tracked in `state.announced`)
 - No external libraries, no bundler
 
