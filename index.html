@@ -18,6 +18,7 @@
   #status.live{color:var(--bright)}
   #status.err{color:var(--red)}
   #readout{font-size:12px;color:var(--txt)}
+  #diag{font-size:11px;color:var(--dim)}
   .controls{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;border-bottom:1px solid var(--line);font-size:12px}
   .controls label{color:var(--dim)}
   .controls input,.controls select{background:#021005;color:var(--txt);border:1px solid var(--line);border-radius:4px;padding:5px 7px;font-family:var(--mono);font-size:12px;width:110px}
@@ -54,6 +55,7 @@
   <h1>RADAR</h1>
   <span id="status">starting…</span>
   <span id="readout"></span>
+  <span id="diag"></span>
 </header>
 
 <div class="controls">
@@ -109,6 +111,7 @@ const state = {
   pollTimer: null, // setInterval handle for the poll loop
   announced: new Set(), // spotter: hex codes already announced this visit
   spotterHex: null, // hex currently shown in the spotter banner
+  diag: { polls: 0, pollErrors: 0, lastAc: 0, lastSource: '', lastMs: 0, drawErrors: 0, lastDrawError: '' },
   routes: new Map(), // callsign -> route object, 'loading', or null (unknown)
 };
 
@@ -201,6 +204,7 @@ async function poll() {
   // overlapping responses can land out of order and yank targets around.
   if (state.fetching) { state.pollAgain = true; return; }
   state.fetching = true;
+  const t0 = performance.now();
   const { lat, lon } = state.center;
   const url = `/api/point?lat=${lat}&lon=${lon}&radiusKm=${state.radiusKm}`;
   try {
@@ -213,10 +217,16 @@ async function poll() {
     state.source = res.headers.get('X-Data-Source') || 'adsb.lol';
     ingest(data.ac);
     state.lastOk = Date.now();
+    state.diag.polls++;
+    state.diag.lastAc = data.ac.length;
+    state.diag.lastSource = state.source;
+    state.diag.lastMs = Math.round(performance.now() - t0);
     setStatus(true);
   } catch (e) {
+    state.diag.pollErrors++;
     setStatus(false, e.message);
   }
+  renderDiag();
   state.fetching = false;
   if (state.pollAgain) { state.pollAgain = false; poll(); }
 }
@@ -360,8 +370,10 @@ function draw(now) {
   ctx.lineTo(cx + Math.sin(sweep) * R, cy - Math.cos(sweep) * R);
   ctx.strokeStyle = 'rgba(120,255,160,0.85)'; ctx.lineWidth = 1.5; ctx.stroke();
 
-  // targets
+  // targets (each drawn inside its own try: one bad record is skipped
+  // and counted instead of taking the whole scope down with it)
   for (const rec of state.aircraft.values()) {
+    try {
     const pos = projectedPos(rec, now);
     const p = toPx(pos.lat, pos.lon, cx, cy, scale);
     if (Math.hypot(p.x - cx, p.y - cy) > R) continue;
@@ -406,6 +418,10 @@ function draw(now) {
     ctx.fillText(String(Math.round(rec.gs)) + ' kt', bx, by + 22);
     ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(flip ? bx + 58 : bx, by + 4);
     ctx.strokeStyle = 'rgba(57,255,106,0.35)'; ctx.stroke();
+    } catch (e) {
+      state.diag.drawErrors++;
+      if (!state.diag.lastDrawError) state.diag.lastDrawError = e.message;
+    }
   }
   requestAnimationFrame(draw);
 }
@@ -491,6 +507,15 @@ function renderPanel() {
     ['Distance', dist.toFixed(1) + ' km'], ['Bearing', Math.round(brg) + '°'],
   );
   det.innerHTML = rows.map(([k, v]) => `<div class="row"><span class="k">${k}</span><span>${v}</span></div>`).join('');
+  renderDiag();
+}
+function renderDiag() {
+  const el = document.getElementById('diag');
+  if (!el) return;
+  const d = state.diag;
+  let s = `polls ${d.polls} · errors ${d.pollErrors} · last: ${d.lastAc} ac from ${d.lastSource || '—'} in ${(d.lastMs / 1000).toFixed(1)} s · tracked ${state.aircraft.size}`;
+  if (d.drawErrors) s += ` · ⚠ draw errors ${d.drawErrors} (${d.lastDrawError})`;
+  el.textContent = s;
 }
 setInterval(renderPanel, 5000); // keep distances/counts fresh between polls
 
