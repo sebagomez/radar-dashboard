@@ -15,7 +15,7 @@ Browser (index.html) → /api/point → server.py → adsb.lol / adsb.fi → JSO
 ```
 
 **Data flow:**
-1. Browser polls `/api/point?lat=X&lon=Y&radiusKm=Z` every 15s (when tab visible)
+1. Browser polls `/api/point?lat=X&lon=Y&radiusKm=Z` at the user-selected refresh interval (15/30/60/120 s, default 15) when the tab is visible; the sweep line completes one revolution per interval, acting as the countdown to the next refresh
 2. `server.py` fetches from adsb.lol (converts km → nautical miles), falls back to adsb.fi; responses are cached 10s per location/range, and if both feeds fail the last good response is served (source marked `(stale)`) for up to 5 min
 3. Response includes `X-Data-Source` header (`adsb.lol` or `adsb.fi`)
 4. Browser ingests aircraft list, projects positions forward via dead reckoning between polls
@@ -69,11 +69,11 @@ open http://localhost:8765
 - `'use strict'`
 - Module-level state object (`state`), no classes
 - Pure functions for geo math (`destPoint`, `haversineKm`, `bearingDeg`, `enuKm`, `applyEnu`)
-- Dead reckoning: `projectedPos(rec, now)` projects from last fix using ground speed + track, capped at 20s past the fix (`MAX_PROJECT_MS`) so a slow refresh cannot project targets off the scope
+- Dead reckoning: `projectedPos(rec, now)` projects from last fix using ground speed + track, capped at one refresh interval + 5s past the fix (`maxProjectMs()`) so a slow refresh cannot project targets off the scope
 - Smooth blending on new fixes: `blendE`/`blendN`/`blendT` decay over ~1s to avoid teleports
 - Canvas rendering: `requestAnimationFrame` loop, 60fps
 - Panel rendering: `setInterval(renderPanel, 5000)` for fresh distances
-- Polling: `setInterval(poll, 15000)` + `document.hidden` check
+- Polling: `setInterval(poll, state.pollMs)` via `resetPollTimer()` + `document.hidden` check; the interval is selectable in the controls (`#interval`) and the sweep period in `draw()` reads the same `state.pollMs`
 - Spotter watchlist: `WATCH_TYPES` maps ICAO type codes (the feed's `t` field) to why an aircraft is interesting; matches get an amber pulsing ring on the scope, a ★ in the traffic list, and a one-time banner announcement per visit (tracked in `state.announced`)
 - No external libraries, no bundler
 
