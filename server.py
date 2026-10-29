@@ -10,6 +10,7 @@ Run:  python3 server.py          (then open http://localhost:8765)
 """
 import json
 import os
+import re
 import sys
 import time
 import urllib.request
@@ -69,6 +70,50 @@ def get_traffic_cached(lat, lon, radius_km):
         raise
 
 
+# Route lookup (origin -> destination) for one callsign, from the free
+# adsbdb.com community database. It maps flight numbers to their scheduled
+# route, so it answers "where is it going" for airline flights. Cached per
+# callsign (unknown callsigns too) so repeat clicks cost nothing.
+ROUTE_CACHE = {}
+ROUTE_TTL_S = 600
+
+
+def fetch_route(callsign):
+    """Return a normalized route dict, or None when the callsign is unknown."""
+    req = urllib.request.Request(f"https://api.adsbdb.com/v0/callsign/{callsign}", headers=UA)
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        if e.code == 404:  # adsbdb answers unknown callsigns with 404
+            return None
+        raise RuntimeError(f"adsbdb: HTTP {e.code}")
+    fr = (data.get("response") or {}).get("flightroute")
+    if not fr:
+        return None
+
+    def airport(a):
+        a = a or {}
+        return {"code": a.get("iata_code") or "",
+                "city": a.get("municipality") or "",
+                "name": a.get("name") or ""}
+
+    return {"callsign": fr.get("callsign") or callsign,
+            "airline": (fr.get("airline") or {}).get("name") or "",
+            "origin": airport(fr.get("origin")),
+            "destination": airport(fr.get("destination"))}
+
+
+def get_route(callsign):
+    now = time.time()
+    hit = ROUTE_CACHE.get(callsign)
+    if hit and now - hit[0] < ROUTE_TTL_S:
+        return hit[1]
+    route = fetch_route(callsign)
+    ROUTE_CACHE[callsign] = (now, route)
+    return route
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):  # keep the console quiet
         pass
@@ -103,6 +148,22 @@ class Handler(BaseHTTPRequestHandler):
                 body, source, cached = get_traffic_cached(lat, lon, radius_km)
                 headers = {"X-Data-Source": source, "X-Cache": "HIT" if cached else "MISS"}
                 self.send_bytes(200, body, "application/json", headers)
+            except RuntimeError as e:
+                body = json.dumps({"error": str(e)}).encode()
+                self.send_bytes(502, body, "application/json")
+            return
+        if parsed.path == "/api/route":
+            q = parse_qs(parsed.query)
+            callsign = (q.get("callsign", [""])[0]).strip().upper()
+            if not re.fullmatch(r"[A-Z0-9]{3,8}", callsign):
+                self.send_bytes(400, b'{"error":"bad callsign"}', "application/json")
+                return
+            try:
+                route = get_route(callsign)
+                payload = {"found": route is not None, "callsign": callsign}
+                if route is not None:
+                    payload.update(route)
+                self.send_bytes(200, json.dumps(payload).encode(), "application/json")
             except RuntimeError as e:
                 body = json.dumps({"error": str(e)}).encode()
                 self.send_bytes(502, body, "application/json")

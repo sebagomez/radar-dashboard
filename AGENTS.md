@@ -96,6 +96,8 @@ open http://localhost:8765
 
 **Key functions:**
 - `server.py:get_traffic(lat, lon, radius_km)` — fetches from adsb.lol/adsb.fi
+- `server.py:get_route(callsign)` — route lookup via adsbdb.com (`/api/route?callsign=ACA429`), cached 10 min per callsign, unknown callsigns return `{"found": false}`
+- `index.html:ensureRoute(rec)` — lazily fetches the selected flight's route once per callsign and shows it in the details panel (airline-style callsigns only)
 - `index.html:ingest(list)` — processes aircraft data, handles blending
 - `index.html:projectedPos(rec, now)` — dead reckoning projection
 - `index.html:draw(now)` — canvas render loop
